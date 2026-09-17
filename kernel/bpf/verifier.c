@@ -365,11 +365,40 @@ static bool is_release_function(enum bpf_func_id func_id)
 	return func_id == BPF_FUNC_sk_release;
 }
 
-static bool is_acquire_function(enum bpf_func_id func_id)
+static bool may_be_acquire_function(enum bpf_func_id func_id)
 {
 	return func_id == BPF_FUNC_sk_lookup_tcp ||
 		func_id == BPF_FUNC_sk_lookup_udp ||
-		func_id == BPF_FUNC_skc_lookup_tcp;
+		func_id == BPF_FUNC_skc_lookup_tcp ||
+		func_id == BPF_FUNC_map_lookup_elem;
+}
+
+static bool is_acquire_function(enum bpf_func_id func_id,
+				const struct bpf_map *map)
+{
+	enum bpf_map_type map_type = map ? map->map_type : BPF_MAP_TYPE_UNSPEC;
+
+	if (func_id == BPF_FUNC_sk_lookup_tcp ||
+	    func_id == BPF_FUNC_sk_lookup_udp ||
+	    func_id == BPF_FUNC_skc_lookup_tcp)
+		return true;
+
+	if (func_id == BPF_FUNC_map_lookup_elem &&
+	    (map_type == BPF_MAP_TYPE_SOCKMAP ||
+	     map_type == BPF_MAP_TYPE_SOCKHASH))
+		return true;
+
+	return false;
+}
+
+static bool reg_type_not_null(enum bpf_reg_type type)
+{
+	return type == PTR_TO_SOCKET ||
+		type == PTR_TO_TCP_SOCK ||
+		type == PTR_TO_MAP_VALUE ||
+		type == PTR_TO_SOCK_COMMON ||
+		type == PTR_TO_CTX ||
+		type == CONST_PTR_TO_MAP;
 }
 
 static bool is_ptr_cast_function(enum bpf_func_id func_id)
@@ -1890,6 +1919,18 @@ static bool register_is_const(struct bpf_reg_state *reg)
 	return reg->type == SCALAR_VALUE && tnum_is_const(reg->var_off);
 }
 
+static bool __is_scalar_unbounded(struct bpf_reg_state *reg)
+{
+	return tnum_is_unknown(reg->var_off) &&
+	       reg->smin_value == S64_MIN && reg->smax_value == S64_MAX &&
+	       reg->umin_value == 0 && reg->umax_value == U64_MAX;
+}
+
+static bool register_is_bounded(struct bpf_reg_state *reg)
+{
+	return reg->type == SCALAR_VALUE && !__is_scalar_unbounded(reg);
+}
+
 static bool __is_pointer_value(bool allow_ptr_leaks,
 			       const struct bpf_reg_state *reg)
 {
@@ -1956,7 +1997,7 @@ static int check_stack_write(struct bpf_verifier_env *env,
 			env->insn_aux_data[insn_idx].sanitize_stack_spill = true;
 	}
 
-	if (reg && size == BPF_REG_SIZE && register_is_const(reg) &&
+	if (reg && size == BPF_REG_SIZE && register_is_bounded(reg) &&
 	    !register_is_null(reg) && env->allow_ptr_leaks) {
 		if (dst_reg != BPF_REG_FP) {
 			/* The backtracking logic can only recognize explicit
@@ -3578,14 +3619,18 @@ static int check_map_func_compatibility(struct bpf_verifier_env *env,
 		if (func_id != BPF_FUNC_sk_redirect_map &&
 		    func_id != BPF_FUNC_sock_map_update &&
 		    func_id != BPF_FUNC_map_delete_elem &&
-		    func_id != BPF_FUNC_msg_redirect_map)
+		    func_id != BPF_FUNC_msg_redirect_map &&
+		    func_id != BPF_FUNC_sk_select_reuseport &&
+		    func_id != BPF_FUNC_map_lookup_elem)
 			goto error;
 		break;
 	case BPF_MAP_TYPE_SOCKHASH:
 		if (func_id != BPF_FUNC_sk_redirect_hash &&
 		    func_id != BPF_FUNC_sock_hash_update &&
 		    func_id != BPF_FUNC_map_delete_elem &&
-		    func_id != BPF_FUNC_msg_redirect_hash)
+		    func_id != BPF_FUNC_msg_redirect_hash &&
+		    func_id != BPF_FUNC_sk_select_reuseport &&
+		    func_id != BPF_FUNC_map_lookup_elem)
 			goto error;
 		break;
 	case BPF_MAP_TYPE_REUSEPORT_SOCKARRAY:
@@ -3751,7 +3796,7 @@ static bool check_refcount_ok(const struct bpf_func_proto *fn, int func_id)
 	/* A reference acquiring function cannot acquire
 	 * another refcounted ptr.
 	 */
-	if (is_acquire_function(func_id) && count)
+	if (may_be_acquire_function(func_id) && count)
 		return false;
 
 	/* We only support one arg being unreferenced at the moment,
@@ -4212,7 +4257,7 @@ static int check_helper_call(struct bpf_verifier_env *env, int func_id, int insn
 	if (is_ptr_cast_function(func_id)) {
 		/* For release_reference() */
 		regs[BPF_REG_0].ref_obj_id = meta.ref_obj_id;
-	} else if (is_acquire_function(func_id)) {
+	} else if (is_acquire_function(func_id, meta.map_ptr)) {
 		int id = acquire_reference_state(env, insn_idx);
 
 		if (id < 0)
@@ -5466,8 +5511,25 @@ static int is_branch_taken(struct bpf_reg_state *reg, u64 val, u8 opcode,
 	struct bpf_reg_state reg_lo;
 	s64 sval;
 
-	if (__is_pointer_value(false, reg))
-		return -1;
+	if (__is_pointer_value(false, reg)) {
+		if (!reg_type_not_null(reg->type))
+			return -1;
+
+		/* If pointer is valid tests against zero will fail so we can
+		 * use this to direct branch taken.
+		 */
+		if (val != 0)
+			return -1;
+
+		switch (opcode) {
+		case BPF_JEQ:
+			return 0;
+		case BPF_JNE:
+			return 1;
+		default:
+			return -1;
+		}
+	}
 
 	if (is_jmp32) {
 		reg_lo = *reg;
@@ -5929,12 +5991,16 @@ static void mark_ptr_or_null_reg(struct bpf_func_state *state,
 		if (is_null) {
 			reg->type = SCALAR_VALUE;
 		} else if (reg->type == PTR_TO_MAP_VALUE_OR_NULL) {
-			if (reg->map_ptr->inner_map_meta) {
+			const struct bpf_map *map = reg->map_ptr;
+
+			if (map->inner_map_meta) {
 				reg->type = CONST_PTR_TO_MAP;
-				reg->map_ptr = reg->map_ptr->inner_map_meta;
-			} else if (reg->map_ptr->map_type ==
-				   BPF_MAP_TYPE_XSKMAP) {
+				reg->map_ptr = map->inner_map_meta;
+			} else if (map->map_type == BPF_MAP_TYPE_XSKMAP) {
 				reg->type = PTR_TO_XDP_SOCK;
+			} else if (map->map_type == BPF_MAP_TYPE_SOCKMAP ||
+				   map->map_type == BPF_MAP_TYPE_SOCKHASH) {
+				reg->type = PTR_TO_SOCKET;
 			} else {
 				reg->type = PTR_TO_MAP_VALUE;
 			}
@@ -6158,7 +6224,11 @@ static int check_cond_jmp_op(struct bpf_verifier_env *env,
 		pred = is_branch_taken(dst_reg, src_reg->var_off.value,
 				       opcode, is_jmp32);
 	if (pred >= 0) {
-		err = mark_chain_precision(env, insn->dst_reg);
+		/* If we get here with a dst_reg pointer type it is because
+		 * above is_branch_taken() special cased the 0 comparison.
+		 */
+		if (!__is_pointer_value(false, dst_reg))
+			err = mark_chain_precision(env, insn->dst_reg);
 		if (BPF_SRC(insn->code) == BPF_X && !err)
 			err = mark_chain_precision(env, insn->src_reg);
 		if (err)

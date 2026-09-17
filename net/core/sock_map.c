@@ -262,6 +262,30 @@ out:
 	return ret;
 }
 
+static int sock_map_link_no_progs(struct bpf_map *map, struct sock *sk)
+{
+	struct sk_psock *psock;
+	int ret;
+
+	psock = sk_psock_get_checked(sk);
+	if (IS_ERR(psock))
+		return PTR_ERR(psock);
+
+	if (psock) {
+		tcp_bpf_reinit(sk);
+		return 0;
+	}
+
+	psock = sk_psock_init(sk, map->numa_node);
+	if (!psock)
+		return -ENOMEM;
+
+	ret = tcp_bpf_init(sk);
+	if (ret < 0)
+		sk_psock_put(sk, psock);
+	return ret;
+}
+
 static void sock_map_free(struct bpf_map *map)
 {
 	struct bpf_stab *stab = container_of(map, struct bpf_stab, map);
@@ -312,6 +336,18 @@ static struct sock *__sock_map_lookup_elem(struct bpf_map *map, u32 key)
 }
 
 static void *sock_map_lookup(struct bpf_map *map, void *key)
+{
+	struct sock *sk;
+
+	sk = __sock_map_lookup_elem(map, *(u32 *)key);
+	if (!sk || !sk_fullsock(sk))
+		return NULL;
+	if (sk_is_refcounted(sk) && !refcount_inc_not_zero(&sk->sk_refcnt))
+		return NULL;
+	return sk;
+}
+
+static void *sock_map_lookup_sys(struct bpf_map *map, void *key)
 {
 	return ERR_PTR(-EOPNOTSUPP);
 }
@@ -375,6 +411,16 @@ static int sock_map_get_next_key(struct bpf_map *map, void *key, void *next)
 	return 0;
 }
 
+static bool sock_map_redirect_allowed(const struct sock *sk)
+{
+	return sk->sk_state != TCP_LISTEN;
+}
+
+static bool sock_map_sk_state_allowed(const struct sock *sk)
+{
+	return (1 << sk->sk_state) & (TCPF_ESTABLISHED | TCPF_LISTEN);
+}
+
 static int sock_map_update_common(struct bpf_map *map, u32 idx,
 				  struct sock *sk, u64 flags)
 {
@@ -397,7 +443,14 @@ static int sock_map_update_common(struct bpf_map *map, u32 idx,
 	if (!link)
 		return -ENOMEM;
 
-	ret = sock_map_link(map, &stab->progs, sk);
+	/* Only sockets we can redirect into/from in BPF need to hold
+	 * refs to parser/verdict progs and have their sk_data_ready
+	 * and sk_write_space callbacks overridden.
+	 */
+	if (sock_map_redirect_allowed(sk))
+		ret = sock_map_link(map, &stab->progs, sk);
+	else
+		ret = sock_map_link_no_progs(map, sk);
 	if (ret < 0)
 		goto out_free;
 
@@ -432,7 +485,8 @@ out_free:
 static bool sock_map_op_okay(const struct bpf_sock_ops_kern *ops)
 {
 	return ops->op == BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB ||
-	       ops->op == BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB;
+	       ops->op == BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB ||
+	       ops->op == BPF_SOCK_OPS_TCP_LISTEN_CB;
 }
 
 static bool sock_map_sk_is_suitable(const struct sock *sk)
@@ -464,7 +518,7 @@ static int sock_map_update_elem(struct bpf_map *map, void *key,
 	}
 
 	sock_map_sk_acquire(sk);
-	if (sk->sk_state != TCP_ESTABLISHED)
+	if (!sock_map_sk_state_allowed(sk))
 		ret = -EOPNOTSUPP;
 	else
 		ret = sock_map_update_common(map, idx, sk, flags);
@@ -501,13 +555,17 @@ BPF_CALL_4(bpf_sk_redirect_map, struct sk_buff *, skb,
 	   struct bpf_map *, map, u32, key, u64, flags)
 {
 	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
+	struct sock *sk;
 
 	if (unlikely(flags & ~(BPF_F_INGRESS)))
 		return SK_DROP;
-	tcb->bpf.flags = flags;
-	tcb->bpf.sk_redir = __sock_map_lookup_elem(map, key);
-	if (!tcb->bpf.sk_redir)
+
+	sk = __sock_map_lookup_elem(map, key);
+	if (unlikely(!sk || !sock_map_redirect_allowed(sk)))
 		return SK_DROP;
+
+	tcb->bpf.flags = flags;
+	tcb->bpf.sk_redir = sk;
 	return SK_PASS;
 }
 
@@ -524,12 +582,17 @@ const struct bpf_func_proto bpf_sk_redirect_map_proto = {
 BPF_CALL_4(bpf_msg_redirect_map, struct sk_msg *, msg,
 	   struct bpf_map *, map, u32, key, u64, flags)
 {
+	struct sock *sk;
+
 	if (unlikely(flags & ~(BPF_F_INGRESS)))
 		return SK_DROP;
-	msg->flags = flags;
-	msg->sk_redir = __sock_map_lookup_elem(map, key);
-	if (!msg->sk_redir)
+
+	sk = __sock_map_lookup_elem(map, key);
+	if (unlikely(!sk || !sock_map_redirect_allowed(sk)))
 		return SK_DROP;
+
+	msg->flags = flags;
+	msg->sk_redir = sk;
 	return SK_PASS;
 }
 
@@ -550,6 +613,7 @@ const struct bpf_map_ops sock_map_ops = {
 	.map_update_elem	= sock_map_update_elem,
 	.map_delete_elem	= sock_map_delete_elem,
 	.map_lookup_elem	= sock_map_lookup,
+	.map_lookup_elem_sys_only = sock_map_lookup_sys,
 	.map_release_uref	= sock_map_release_progs,
 	.map_check_btf		= map_check_no_btf,
 };
@@ -724,7 +788,14 @@ static int sock_hash_update_common(struct bpf_map *map, void *key,
 	if (!link)
 		return -ENOMEM;
 
-	ret = sock_map_link(map, &htab->progs, sk);
+	/* Only sockets we can redirect into/from in BPF need to hold
+	 * refs to parser/verdict progs and have their sk_data_ready
+	 * and sk_write_space callbacks overridden.
+	 */
+	if (sock_map_redirect_allowed(sk))
+		ret = sock_map_link(map, &htab->progs, sk);
+	else
+		ret = sock_map_link_no_progs(map, sk);
 	if (ret < 0)
 		goto out_free;
 
@@ -792,7 +863,7 @@ static int sock_hash_update_elem(struct bpf_map *map, void *key,
 	}
 
 	sock_map_sk_acquire(sk);
-	if (sk->sk_state != TCP_ESTABLISHED)
+	if (!sock_map_sk_state_allowed(sk))
 		ret = -EOPNOTSUPP;
 	else
 		ret = sock_hash_update_common(map, key, sk, flags);
@@ -990,13 +1061,17 @@ BPF_CALL_4(bpf_sk_redirect_hash, struct sk_buff *, skb,
 	   struct bpf_map *, map, void *, key, u64, flags)
 {
 	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
+	struct sock *sk;
 
 	if (unlikely(flags & ~(BPF_F_INGRESS)))
 		return SK_DROP;
-	tcb->bpf.flags = flags;
-	tcb->bpf.sk_redir = __sock_hash_lookup_elem(map, key);
-	if (!tcb->bpf.sk_redir)
+
+	sk = __sock_hash_lookup_elem(map, key);
+	if (unlikely(!sk || !sock_map_redirect_allowed(sk)))
 		return SK_DROP;
+
+	tcb->bpf.flags = flags;
+	tcb->bpf.sk_redir = sk;
 	return SK_PASS;
 }
 
@@ -1013,12 +1088,17 @@ const struct bpf_func_proto bpf_sk_redirect_hash_proto = {
 BPF_CALL_4(bpf_msg_redirect_hash, struct sk_msg *, msg,
 	   struct bpf_map *, map, void *, key, u64, flags)
 {
+	struct sock *sk;
+
 	if (unlikely(flags & ~(BPF_F_INGRESS)))
 		return SK_DROP;
-	msg->flags = flags;
-	msg->sk_redir = __sock_hash_lookup_elem(map, key);
-	if (!msg->sk_redir)
+
+	sk = __sock_hash_lookup_elem(map, key);
+	if (unlikely(!sk || !sock_map_redirect_allowed(sk)))
 		return SK_DROP;
+
+	msg->flags = flags;
+	msg->sk_redir = sk;
 	return SK_PASS;
 }
 
@@ -1032,13 +1112,31 @@ const struct bpf_func_proto bpf_msg_redirect_hash_proto = {
 	.arg4_type      = ARG_ANYTHING,
 };
 
+static void *sock_hash_lookup_sys(struct bpf_map *map, void *key)
+{
+	return ERR_PTR(-EOPNOTSUPP);
+}
+
+static void *sock_hash_lookup(struct bpf_map *map, void *key)
+{
+	struct sock *sk;
+
+	sk = __sock_hash_lookup_elem(map, key);
+	if (!sk || !sk_fullsock(sk))
+		return NULL;
+	if (sk_is_refcounted(sk) && !refcount_inc_not_zero(&sk->sk_refcnt))
+		return NULL;
+	return sk;
+}
+
 const struct bpf_map_ops sock_hash_ops = {
 	.map_alloc		= sock_hash_alloc,
 	.map_free		= sock_hash_free,
 	.map_get_next_key	= sock_hash_get_next_key,
 	.map_update_elem	= sock_hash_update_elem,
 	.map_delete_elem	= sock_hash_delete_elem,
-	.map_lookup_elem	= sock_map_lookup,
+	.map_lookup_elem	= sock_hash_lookup,
+	.map_lookup_elem_sys_only = sock_hash_lookup_sys,
 	.map_release_uref	= sock_hash_release_progs,
 	.map_check_btf		= map_check_no_btf,
 };
