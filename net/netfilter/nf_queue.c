@@ -17,6 +17,7 @@
 #include <linux/rcupdate.h>
 #include <net/protocol.h>
 #include <net/netfilter/nf_queue.h>
+#include <net/sock.h>
 #include <net/dst.h>
 
 #include "nf_internals.h"
@@ -192,6 +193,18 @@ static int __nf_queue(struct sk_buff *skb, const struct nf_hook_state *state,
 	default:
 		route_key_size = 0;
 		break;
+	}
+
+	if (skb_sk_is_prefetched(skb)) {
+		struct sock *sk = skb->sk;
+
+		if (!sk_is_refcounted(sk)) {
+			if (!refcount_inc_not_zero(&sk->sk_refcnt))
+				return -ENOTCONN;
+
+			/* drop refcount on skb_orphan */
+			skb->destructor = sock_edemux;
+		}
 	}
 
 	entry = kmalloc(sizeof(*entry) + route_key_size, GFP_ATOMIC);
