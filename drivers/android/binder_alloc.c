@@ -25,6 +25,7 @@
 #include <linux/sizes.h>
 #include "binder_alloc.h"
 #include "binder_trace.h"
+#include <trace/hooks/binder.h>
 
 #ifdef CONFIG_SAMSUNG_FREECESS
 #include <linux/freecess.h>
@@ -447,6 +448,7 @@ static struct binder_buffer *binder_alloc_new_buf_locked(
 	}
 #endif
 
+	trace_android_vh_binder_alloc_new_buf_locked(size, alloc, is_async);
 
 	if (is_async && alloc->free_async_space < size) {
 		pr_info("%d: binder_alloc_buf size %zd(%zd) failed, no async space left\n",
