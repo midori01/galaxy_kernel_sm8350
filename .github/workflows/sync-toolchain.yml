@@ -1,0 +1,58 @@
+name: Sync Google Clang Toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_hash:
+        description: "Google Git Commit Hash"
+        required: true
+        default: "131f4e02e5889bfd7611eb0f3aad048efa7aed81"
+      clang_version:
+        description: "Clang Version Name"
+        required: true
+        default: "clang-r614150"
+      target_tag:
+        description: "Target Release Tag"
+        required: true
+        default: "toolchain"
+
+jobs:
+  sync_toolchain:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Download Clang from Google Gitiles
+        run: |
+          echo "[+] Downloading ${{ github.event.inputs.clang_version }} from Google Gitiles..."
+          URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${{ github.event.inputs.commit_hash }}/${{ github.event.inputs.clang_version }}.tar.gz"
+          echo "URL: $URL"
+          curl -fL --retry 3 --retry-delay 5 -o "${{ github.event.inputs.clang_version }}.tar.gz" "$URL"
+
+      - name: Verify Archive & Clang Binaries
+        run: |
+          echo "[+] Checking archive integrity..."
+          tar -ztvf "${{ github.event.inputs.clang_version }}.tar.gz" | head -n 15
+
+          echo "[+] Extracting test files to verify compiler..."
+          mkdir -p test_clang
+          tar -zxf "${{ github.event.inputs.clang_version }}.tar.gz" -C test_clang
+
+          echo "[+] Version info:"
+          cat test_clang/AndroidVersion.txt
+          ./test_clang/bin/clang --version
+          ./test_clang/bin/ld.lld --version
+
+          rm -rf test_clang
+          echo "[✓] Archive verified successfully!"
+
+      - name: Upload to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "[+] Uploading ${{ github.event.inputs.clang_version }}.tar.gz to release '${{ github.event.inputs.target_tag }}'..."
+          gh release upload "${{ github.event.inputs.target_tag }}" "${{ github.event.inputs.clang_version }}.tar.gz" --clobber --repo "${{ github.repository }}"
+          echo "[✓] Upload completed successfully!"
