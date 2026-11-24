@@ -52,6 +52,7 @@
  *	Based upon Swansea University Computer Society NET3.039
  */
 
+#include <linux/vpnhide.h>
 #include <linux/mm.h>
 #include <linux/socket.h>
 #include <linux/file.h>
@@ -1665,10 +1666,17 @@ int __sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
 			err = security_socket_bind(sock,
 						   (struct sockaddr *)&address,
 						   addrlen);
-			if (!err)
+			if (!err) {
+#ifdef CONFIG_VPNHIDE
+		vpnhide_bind_pre(sock, (struct sockaddr *)&address, addrlen);
+#endif
 				err = sock->ops->bind(sock,
 						      (struct sockaddr *)
 						      &address, addrlen);
+#ifdef CONFIG_VPNHIDE
+		vpnhide_bind_post(sock, err);
+#endif
+			}
 		}
 		fput_light(sock->file, fput_needed);
 	}
@@ -1701,6 +1709,9 @@ int __sys_listen(int fd, int backlog)
 		err = security_socket_listen(sock, backlog);
 		if (!err)
 			err = sock->ops->listen(sock, backlog);
+#ifdef CONFIG_VPNHIDE
+			vpnhide_listen_post(sock, err);
+#endif
 
 		fput_light(sock->file, fput_needed);
 	}
@@ -1835,6 +1846,23 @@ int __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)
 	struct sockaddr_storage address;
 	int err, fput_needed;
 
+#ifdef CONFIG_VPNHIDE
+	{
+		struct fd _f = fdget(fd);
+		if (_f.file) {
+			int _err = 0;
+			struct socket *_sock = sock_from_file(_f.file, &_err);
+			if (_sock) {
+				int _ret = 0;
+				if (vpnhide_connect(_sock, uservaddr, addrlen, &_ret)) {
+					fdput(_f);
+					return _ret;
+				}
+			}
+			fdput(_f);
+		}
+	}
+#endif
 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
 	if (!sock)
 		goto out;
@@ -1885,6 +1913,9 @@ int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,
 	if (err < 0)
 		goto out_put;
         /* "err" is actually length in this case */
+#ifdef CONFIG_VPNHIDE
+	vpnhide_getname(sock, (struct sockaddr *)&address, 0, &err);
+#endif
 	err = move_addr_to_user(&address, err, usockaddr, usockaddr_len);
 
 out_put:
@@ -1920,10 +1951,14 @@ int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,
 		}
 
 		err = sock->ops->getname(sock, (struct sockaddr *)&address, 1);
-		if (err >= 0)
+		if (err >= 0) {
 			/* "err" is actually length in this case */
+#ifdef CONFIG_VPNHIDE
+			vpnhide_getname(sock, (struct sockaddr *)&address, 1, &err);
+#endif
 			err = move_addr_to_user(&address, err, usockaddr,
 						usockaddr_len);
+		}
 		fput_light(sock->file, fput_needed);
 	}
 	return err;
@@ -2077,6 +2112,15 @@ static int __sys_setsockopt(int fd, int level, int optname,
 
 	sock = sockfd_lookup_light(fd, &err, &fput_needed);
 	if (sock != NULL) {
+#ifdef CONFIG_VPNHIDE
+		{
+			int _vret = vpnhide_setsockopt_sock(sock, level, optname, optval, optlen);
+			if (_vret) {
+				err = (_vret > 0) ? 0 : _vret;
+				goto out_put;
+			}
+		}
+#endif
 		err = security_socket_setsockopt(sock, level, optname);
 		if (err)
 			goto out_put;
@@ -2155,6 +2199,10 @@ static int __sys_getsockopt(int fd, int level, int optname,
 						     optval, optlen,
 						     max_optlen, err);
 out_put:
+
+#ifdef CONFIG_VPNHIDE
+	vpnhide_getsockopt(sock, level, optname, optval, optlen, &err);
+#endif
 		fput_light(sock->file, fput_needed);
 	}
 	return err;

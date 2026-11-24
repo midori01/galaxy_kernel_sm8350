@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2011-2014 PLUMgrid, http://plumgrid.com
  */
+#include <linux/vpnhide.h>
 #include <linux/bpf.h>
 #include <linux/bpf_trace.h>
 #include <linux/bpf_lirc.h>
@@ -845,6 +846,10 @@ done:
 		goto free_value;
 
 	err = -EFAULT;
+#ifdef CONFIG_VPNHIDE
+	vpnhide_bpf_lookup_elem(map, key, value);
+#endif
+
 	if (copy_to_user(uvalue, value, value_size) != 0)
 		goto free_value;
 

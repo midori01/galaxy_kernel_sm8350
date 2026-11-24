@@ -74,6 +74,7 @@
 
 #define pr_fmt(fmt) "UDP: " fmt
 
+#include <linux/vpnhide.h>
 #include <linux/uaccess.h>
 #include <asm/ioctls.h>
 #include <linux/memblock.h>
@@ -1007,6 +1008,13 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	struct sk_buff *skb;
 	struct ip_options_data opt_copy;
 
+#ifdef CONFIG_VPNHIDE
+	{
+		int _err = 0;
+		if (vpnhide_udp_sendmsg_pre(sk, msg, len, &_err))
+			return _err;
+	}
+#endif
 	if (len > 0xFFFF)
 		return -EMSGSIZE;
 

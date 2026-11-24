@@ -38,6 +38,7 @@
 
 #define VERSION "0.409"
 
+#include <linux/vpnhide.h>
 #include <linux/cache.h>
 #include <linux/uaccess.h>
 #include <linux/bitops.h>
@@ -2798,6 +2799,12 @@ static int fib_route_seq_show(struct seq_file *seq, void *v)
 		struct fib_info *fi = fa->fa_info;
 		__be32 mask = inet_make_mask(KEYLENGTH - fa->fa_slen);
 		unsigned int flags = fib_flag_trans(fa->fa_type, mask, fi);
+
+#ifdef CONFIG_VPNHIDE
+		if (fi && fi->fib_nh[0].fib_nh_dev &&
+		    vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev))
+			continue;
+#endif
 
 		if ((fa->fa_type == RTN_BROADCAST) ||
 		    (fa->fa_type == RTN_MULTICAST))

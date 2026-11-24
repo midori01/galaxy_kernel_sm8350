@@ -16,6 +16,7 @@
 
 #define pr_fmt(fmt) "IPv6: " fmt
 
+#include <linux/vpnhide.h>
 #include <linux/module.h>
 #include <linux/capability.h>
 #include <linux/errno.h>
@@ -291,6 +292,14 @@ static int __inet6_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 
 	if (addr->sin6_family != AF_INET6)
 		return -EAFNOSUPPORT;
+
+#ifdef CONFIG_VPNHIDE
+	{
+		int _r = vpnhide_inet6_bind_ll(sk, uaddr, addr_len);
+		if (_r)
+			return _r;
+	}
+#endif
 
 	addr_type = ipv6_addr_type(&addr->sin6_addr);
 	if ((addr_type & IPV6_ADDR_MULTICAST) && sk->sk_type == SOCK_STREAM)

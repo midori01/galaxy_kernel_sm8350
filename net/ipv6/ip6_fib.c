@@ -15,6 +15,7 @@
 
 #define pr_fmt(fmt) "IPv6: " fmt
 
+#include <linux/vpnhide.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/net.h>
@@ -2402,6 +2403,12 @@ static int ipv6_route_seq_show(struct seq_file *seq, void *v)
 	}
 
 	dev = fib6_nh->fib_nh_dev;
+#ifdef CONFIG_VPNHIDE
+	if (dev && vpnhide_should_hide_dev(dev))
+		return 0;
+#endif
+
+
 	seq_printf(seq, " %08x %08x %08x %08x %8s\n",
 		   rt->fib6_metric, refcount_read(&rt->fib6_ref), 0,
 		   flags, dev ? dev->name : "");

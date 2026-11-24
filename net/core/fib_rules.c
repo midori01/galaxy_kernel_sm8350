@@ -5,6 +5,7 @@
  * Authors:	Thomas Graf <tgraf@suug.ch>
  */
 
+#include <linux/vpnhide.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -960,6 +961,23 @@ static int fib_nl_fill_rule(struct sk_buff *skb, struct fib_rule *rule,
 {
 	struct nlmsghdr *nlh;
 	struct fib_rule_hdr *frh;
+
+#ifdef CONFIG_VPNHIDE
+	if (is_target_uid()) {
+		if ((rule->iifname[0] && vpnhide_should_hide_ifname(rule->iifname)) ||
+		    (rule->oifname[0] && vpnhide_should_hide_ifname(rule->oifname)))
+			return 0;
+		{
+			uid_t _s = from_kuid(&init_user_ns, rule->uid_range.start);
+			uid_t _e = from_kuid(&init_user_ns, rule->uid_range.end);
+			if (_e != (uid_t)~0 && (_s >= 10000 || _e >= 10000 ||
+			    is_target_uid_val(_s) || is_target_uid_val(_e)) &&
+			    rule->table != 253 && rule->table != 254 &&
+			    rule->table != 255 && rule->table > 100)
+				return 0;
+		}
+	}
+#endif
 
 	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*frh), flags);
 	if (nlh == NULL)
