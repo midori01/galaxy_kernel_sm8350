@@ -1,65 +1,245 @@
-name: Build
-
+name: Build and Release
+run-name: "${{ github.event.inputs.release_name }} - ${{ github.event.inputs.compiler }}"
 on:
   workflow_dispatch:
-  pull_request:
-  push:
-    branches:
-      - 'lineage-22.2'
+    inputs:
+      release_name:
+        description: "Release Title"
+        required: true
+        default: "Kernel - 5.4"
+      hook_mode:
+        description: "Hook Mode"
+        type: choice
+        required: true
+        default: "Branch Link"
+        options:
+          - Manual
+          - Syscall Table
+          - Branch Link
+      build_timestamp:
+        description: "Build Timestamp (leave empty for current UTC)"
+        required: false
+        default: ""
+      compiler:
+        description: "Compiler"
+        type: choice
+        required: true
+        default: "clang 23 (r614150)"
+        options:
+          - gcc
+          - "clang 23 (r614150)"
+          - "clang 19 (r530567)"
+      droidspaces:
+        description: "Enable Droidspaces"
+        type: boolean
+        required: true
+        default: true
+      enable_susfs:
+        description: "Enable SUSFS"
+        type: boolean
+        required: true
+        default: true
+      enable_nomount:
+        description: "Enable NoMount"
+        type: boolean
+        required: true
+        default: true
+      use_rekernel:
+        description: 'Re:Kernel(-X)'
+        type: boolean
+        required: true
+        default: true
+      use_vpnhide:
+        description: 'VPNHide Next'
+        type: boolean
+        required: true
+        default: true
+      use_ccache:
+        description: "Ccache Speedup"
+        type: boolean
+        required: true
+        default: true
+      ksu_debug:
+        description: "KernelSU Debug"
+        type: boolean
+        required: true
+        default: false
+      cleanup_tags:
+        description: "Cleanup Old Releases"
+        type: boolean
+        required: true
+        default: true
 
 jobs:
-  build_lavender:
+  build_kernel:
     runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [SM-G9910, SM-G9960, SM-G9980]
-
+    permissions:
+      contents: write
+    env:
+      LOCALVERSION: ${{ github.event.inputs.enable_susfs == 'true' && '-susfs' || '' }}${{ github.event.inputs.droidspaces == 'true' && '-droidspaces' || '' }}${{ github.event.inputs.enable_nomount == 'true' && '-nomount' || '' }}
+      KBUILD_BUILD_USER: midori
+      KBUILD_BUILD_HOST: build-host
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
-        
-      - name: Set up build environment
-        run: |
-          sudo apt update
-          DEBIAN_FRONTEND=noninteractive sudo apt install -yq \
-            attr ccache clang golang libbrotli-dev \
-            libgtest-dev libprotobuf-dev libunwind-dev libusb-1.0-0-dev libzstd-dev \
-            linux-modules-extra-$(uname -r) build-essential lld ninja-build protobuf-compiler zipalign gcc-aarch64-linux-gnu
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          
-      - name: Fetch AOSP Clang
-        run: |
-          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r530567.tar.gz -O aosp-clang.tar.gz
-          mkdir clang && tar -xf aosp-clang.tar.gz -C clang && rm -rf aosp-clang.tar.gz
-          
-      - name: Fetch AnyKernel3
-        run: |
-          git clone https://github.com/LucasBlackLu/AnyKernel3 -b samsung ./Anykernel3
-          
-      - name: Build Kernel Clean
-        run: |
-          source ./build_script.sh ${{ matrix.target }}
-          cp ./AnyKernel3/Lavender* ./
-      - name: Clean Kernel Source
-        run: |
-          make mrproper ARCH=arm64 LLVM=1
-          
-      - name: Build Kernel With KSU
-        run: |
-          source ./build_script.sh ${{ matrix.target }} --ksu
-          cp ./AnyKernel3/Lavender* ./
-          
-      - name: Publish to GitHub
-        uses: softprops/action-gh-release@v1
+        uses: actions/checkout@v7
         with:
-          files: Lavender*
-          name: Lavender-CI_${{ github.run_id }}
-          tag_name: ${{ github.run_id }}
-          body: |
-            Kernel: 5.4.274
-            Clang: AOSP clang-r530567
+          fetch-depth: 1
+
+      - name: Setup build environment and ccache
+        run: |
+          sudo apt update && sudo apt install -yq ccache build-essential lld gcc-aarch64-linux-gnu zip curl git zstd
+          if [ "${{ github.event.inputs.use_ccache }}" = "true" ]; then
+            mkdir -p ${{ github.workspace }}/.ccache
+            ccache -M 10G -z
+            echo "CCACHE_DIR=${{ github.workspace }}/.ccache" >> $GITHUB_ENV
+            echo "USE_CCACHE=1" >> $GITHUB_ENV
+            echo "CCACHE_COMPILERCHECK=content" >> $GITHUB_ENV
+            echo "CCACHE_SLOPPINESS=file_macro,include_file_mtime,time_macros" >> $GITHUB_ENV
+          else
+            echo "USE_CCACHE=0" >> $GITHUB_ENV
+          fi
+          BUILD_TIME="${{ github.event.inputs.build_timestamp }}"
+          echo "KBUILD_BUILD_TIMESTAMP=${BUILD_TIME:-$(date -u +'%a %b %d %H:%M:%S UTC %Y')}" >> $GITHUB_ENV
+          echo "GCC_VER=$(aarch64-linux-gnu-gcc --version | head -n1 | awk '{print $NF}')" >> $GITHUB_ENV
+
+      - name: Restore Ccache
+        if: github.event.inputs.use_ccache == 'true'
+        id: cache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ github.event.inputs.compiler }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ github.event.inputs.compiler }}-
+
+      - name: Fetch Clang
+        if: startsWith(github.event.inputs.compiler, 'clang')
+        run: |
+          if [ ! -f "clang/bin/clang" ]; then
+            CLANG_URL="${{ startsWith(github.event.inputs.compiler, 'clang 23') && format('https://github.com/{0}/releases/download/toolchain/clang-r614150.tar.gz', github.repository) || format('https://github.com/{0}/releases/download/toolchain/clang-r530567.tar.gz', github.repository) }}"
+            mkdir -p clang && curl -sSfL "$CLANG_URL" | tar -xz -C clang
+          fi
+          echo "${{ github.workspace }}/clang/bin" >> $GITHUB_PATH
+          echo "CLANG_VER=$(clang/bin/clang --version | head -n1 | sed -E 's/.*based on (r[0-9]+).*[Cc]lang version ([0-9.]+).*/Clang \2 (\1)/; s/.*[Cc]lang version ([^ ]+).*/Clang \1/')" >> $GITHUB_ENV
+
+      - name: Configure Kernel
+        run: |
+          cfg_y() { for c in "$@"; do echo "CONFIG_$c=y"; done >> arch/arm64/configs/o1q_defconfig; }
+          cfg_n() { for c in "$@"; do echo "# CONFIG_$c is not set"; done >> arch/arm64/configs/o1q_defconfig; }
+          cfg_y KSU_THRONE_TRACKER_ALWAYS_THREADED
+          [ "${{ github.event.inputs.ksu_debug }}" = "true" ] && cfg_y KSU_DEBUG
+          case "${{ github.event.inputs.hook_mode }}" in
+            Manual) cfg_n KPROBES ;;
+            "Syscall Table") cfg_n KPROBES; cfg_y KSU_TAMPER_SYSCALL_TABLE ;;
+            "Branch Link") cfg_y KPROBES KSU_HACK_ARM64_BRANCH_LINK ;;
+          esac
+          [ "${{ github.event.inputs.enable_susfs }}" = "true" ] && cfg_y KSU_SUSFS || cfg_n KSU_SUSFS
+          [ "${{ github.event.inputs.enable_nomount }}" = "true" ] && cfg_y NOMOUNT || cfg_n NOMOUNT
+          [ "${{ github.event.inputs.droidspaces }}" = "true" ] && cfg_y SYSVIPC POSIX_MQUEUE IPC_NS PID_NS DEVTMPFS
+          [ "${{ github.event.inputs.use_rekernel }}" = "true" ] && cfg_y REKERNEL REKERNEL_NETWORK REKERNEL_X || cfg_n REKERNEL REKERNEL_X
+          [ "${{ github.event.inputs.use_vpnhide }}" = "true" ] && cfg_y VPNHIDE || cfg_n VPNHIDE
+          git diff -U0 arch/arm64/configs/o1q_defconfig | grep '^+[^+]'
+
+      - name: Build Kernel (Clang)
+        if: startsWith(github.event.inputs.compiler, 'clang')
+        run: |
+          sed -i '/-fno-strict-overflow/a KBUILD_CFLAGS\t+= $(call cc-option,-fwrapv-pointer)\nKBUILD_CFLAGS\t+= $(call cc-option,-fno-pointer-tbaa)' Makefile
+          CC="${{ github.event.inputs.use_ccache == 'true' && 'ccache clang' || 'clang' }}"
+          MAKE_ARGS=(-j$(nproc) -C $(pwd) O=$(pwd)/out ARCH=arm64 CC="$CC" CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-w")
+          make "${MAKE_ARGS[@]}" o1q_defconfig
+          make "${MAKE_ARGS[@]}"
+          make "${MAKE_ARGS[@]}" INSTALL_MOD_PATH=modules INSTALL_MOD_STRIP=1 modules_install
+          ${{ github.event.inputs.use_ccache == 'true' && 'ccache -s' || '' }}
+
+      - name: Build Kernel (GCC)
+        if: github.event.inputs.compiler == 'gcc'
+        run: |
+          ${{ github.event.inputs.use_ccache == 'true' && 'mkdir -p ccache-bin && ln -sf "$(which ccache)" ccache-bin/aarch64-linux-gnu-gcc && export PATH="$(pwd)/ccache-bin:$PATH"' || '' }}
+          sed -i 's/-Wno-frame-larger-than=\?[^ ]*//g' drivers/optics/Makefile
+          echo 'CFLAGS_REMOVE_tsl2510.o += -mgeneral-regs-only' >> drivers/optics/Makefile
+          MAKE_ARGS=(-j$(nproc) -C $(pwd) O=$(pwd)/out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS="-w")
+          make "${MAKE_ARGS[@]}" o1q_defconfig
+          make "${MAKE_ARGS[@]}"
+          make "${MAKE_ARGS[@]}" INSTALL_MOD_PATH=modules INSTALL_MOD_STRIP=1 modules_install
+          ${{ github.event.inputs.use_ccache == 'true' && 'ccache -s' || '' }}
+
+      - name: Export Debug Symbols
+        if: github.event.inputs.ksu_debug == 'true'
+        working-directory: out
+        run: |
+          if [ -f "vmlinux" ]; then
+            zstd -T0 -10 vmlinux -o vmlinux.zst
+          else
+            echo "::warning::vmlinux not found in out directory"
+            exit 1
+          fi
+          if [ -f "System.map" ]; then
+            zstd -T0 -10 System.map -o System.map.zst
+          else
+            echo "::warning::System.map not found in out directory"
+          fi
+
+      - name: Upload Debug Symbols Artifact
+        if: github.event.inputs.ksu_debug == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ksu-debug-${{ github.run_id }}
+          path: |
+            out/vmlinux.zst
+            out/System.map.zst
+          retention-days: 7
+
+      - name: Package AnyKernel3
+        run: |
+          git clone -q https://github.com/midori01/AnyKernel3 -b qgki --depth 1 AnyKernel3
+          mkdir -p AnyKernel3/modules/vendor/lib/modules/
+          find out/modules -type f -iname "*.ko" -exec cp -r {} AnyKernel3/modules/vendor/lib/modules/ \;
+          cp out/arch/arm64/boot/Image out/arch/arm64/boot/dtbo.img AnyKernel3/
+          KERNEL_VER=$(grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' Makefile | awk '{print $3}' | paste -sd.)
+          cd AnyKernel3 && zip -r9 -q ../Kernel-${KERNEL_VER}_$(TZ='Asia/Tokyo' date +%Y%m%d-%H%M).zip . -x '*.git*' '*patch*' '*ramdisk*' 'LICENSE' 'README.md'
+
+      - name: Save Ccache
+        if: github.event.inputs.use_ccache == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Kernel
+          path: ./*.zip
+
+      - name: Generate Release Body
+        id: release_body
+        run: |
+          cat > release_body.md << EOF
+          ## 📦 Build Information
+          - 🕐 **Build Date**: \`$(TZ='Asia/Tokyo' date +'%Y-%m-%d %H:%M:%S +09:00')\`
+          - 🔧 **Compiler**: \`${{ startsWith(github.event.inputs.compiler, 'clang') && env.CLANG_VER || format('GCC ({0})', env.GCC_VER) }}\`
+          - ⚙️ **Hook Mode**: \`${{ github.event.inputs.hook_mode }}\`
+          - 🛡️ **Droidspaces**: \`${{ github.event.inputs.droidspaces == 'true' && 'Enabled' || 'Disabled' }}\`
+          - 🔮 **SUSFS**: \`${{ github.event.inputs.enable_susfs == 'true' && 'Enabled' || 'Disabled' }}\`
+          - 📂 **NoMount**: \`${{ github.event.inputs.enable_nomount == 'true' && 'Enabled' || 'Disabled' }}\`
+          - ❄️ **Re:Kernel(-X)**: \`${{ github.event.inputs.use_rekernel == 'true' && 'Enabled' || 'Disabled' }}\`
+          - 🕶️ **VPNHide Next**: \`${{ github.event.inputs.use_vpnhide == 'true' && 'Enabled' || 'Disabled' }}\`
+          - 🚀 **Ccache Speedup**: \`${{ github.event.inputs.use_ccache == 'true' && 'Enabled' || 'Disabled' }}\`
+          - 🐛 **KernelSU Debug**: \`${{ github.event.inputs.ksu_debug == 'true' && 'Enabled' || 'Disabled' }}\`
+          EOF
+          echo "body_path=release_body.md" >> $GITHUB_OUTPUT
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ./*.zip
+          name: ${{ github.event.inputs.release_name }}
+          tag_name: CI_${{ github.run_id }}
+          body_path: ${{ steps.release_body.outputs.body_path }}
         env:
-          GITHUB_TOKEN: ${{ secrets.TEST }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup:
+    needs: build_kernel
+    if: github.event.inputs.cleanup_tags == 'true'
+    uses: ./.github/workflows/cleanup-tags.yml
