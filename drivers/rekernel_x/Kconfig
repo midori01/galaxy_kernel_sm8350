@@ -1,0 +1,5 @@
+config REKERNEL_X
+	bool "Re:Kernel-X"
+	default n
+	help
+	  Build Re:Kernel-X as a built-in driver.

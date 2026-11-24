@@ -280,4 +280,5 @@ source "drivers/input/wacom/Kconfig" # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMI
 source "drivers/sensors/vl53l5/Kconfig" # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
 source "drivers/fgetpriority/Kconfig"
 source "drivers/rekernel/Kconfig"
+source "drivers/rekernel_x/Kconfig"
 endmenu

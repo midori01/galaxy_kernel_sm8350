@@ -237,3 +237,4 @@ obj-y += input/wacom/ # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
 obj-y += sensors/vl53l5/ # ADDED BY LEGO AUTOMATICALLY: DO NOT SUBMIT
 obj-$(CONFIG_FGETPRIORITY) += fgetpriority/
 obj-$(CONFIG_REKERNEL) += rekernel/
+obj-$(CONFIG_REKERNEL_X) += rekernel_x/
