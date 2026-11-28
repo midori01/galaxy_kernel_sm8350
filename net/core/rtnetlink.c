@@ -12,6 +12,7 @@
  *	Vitaly E. Lavrov		RTA_OK arithmetics was wrong.
  */
 
+#include <linux/vpnhide.h>
 #include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/module.h>
@@ -1600,6 +1601,11 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb,
 	struct ifinfomsg *ifm;
 	struct nlmsghdr *nlh;
 	struct Qdisc *qdisc;
+
+#ifdef CONFIG_VPNHIDE
+	if (dev && vpnhide_should_hide_dev(dev))
+		return 0;
+#endif
 
 	ASSERT_RTNL();
 	nlh = nlmsg_put(skb, pid, seq, type, sizeof(*ifm), flags);

@@ -22,6 +22,7 @@
 
 #define pr_fmt(fmt) "IPv6: " fmt
 
+#include <linux/vpnhide.h>
 #include <linux/capability.h>
 #include <linux/errno.h>
 #include <linux/export.h>
@@ -5452,6 +5453,13 @@ static int rt6_fill_node(struct net *net, struct sk_buff *skb,
 	struct rtmsg *rtm;
 	long expires = 0;
 
+#ifdef CONFIG_VPNHIDE
+	{
+		struct net_device *_dev = dst ? dst->dev : rt->fib6_nh->fib_nh_dev;
+		if (_dev && vpnhide_should_hide_dev(_dev))
+			return 0;
+	}
+#endif
 	nlh = nlmsg_put(skb, portid, seq, type, sizeof(*rtm), flags);
 	if (!nlh)
 		return -EMSGSIZE;

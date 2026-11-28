@@ -22,6 +22,7 @@
  */
 
 
+#include <linux/vpnhide.h>
 #include <linux/uaccess.h>
 #include <linux/bitops.h>
 #include <linux/capability.h>
@@ -1080,6 +1081,14 @@ int devinet_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr)
 	dev = __dev_get_by_name(net, ifr->ifr_name);
 	if (!dev)
 		goto done;
+#ifdef CONFIG_VPNHIDE
+	if (vpnhide_should_hide_dev(dev)) {
+		ret = -ENODEV;
+		goto done;
+	}
+#endif
+
+
 
 	if (colon)
 		*colon = ':';
@@ -1364,6 +1373,11 @@ no_in_dev:
 	   in dev_base list.
 	 */
 	for_each_netdev_rcu(net, dev) {
+#ifdef CONFIG_VPNHIDE
+		if (vpnhide_should_hide_dev(dev))
+			continue;
+#endif
+
 		if (l3mdev_master_ifindex_rcu(dev) != master_idx)
 			continue;
 
@@ -1666,6 +1680,11 @@ static int inet_fill_ifaddr(struct sk_buff *skb, struct in_ifaddr *ifa,
 	struct nlmsghdr  *nlh;
 	u32 preferred, valid;
 
+#ifdef CONFIG_VPNHIDE
+	if (ifa->ifa_dev && ifa->ifa_dev->dev &&
+	    vpnhide_should_hide_dev(ifa->ifa_dev->dev))
+		return 0;
+#endif
 	nlh = nlmsg_put(skb, args->portid, args->seq, args->event, sizeof(*ifm),
 			args->flags);
 	if (!nlh)

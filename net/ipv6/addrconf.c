@@ -36,6 +36,7 @@
 
 #define pr_fmt(fmt) "IPv6: " fmt
 
+#include <linux/vpnhide.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -1837,7 +1838,12 @@ int ipv6_dev_get_saddr(struct net *net, const struct net_device *dst_dev,
 		}
 
 		for_each_netdev_rcu(net, dev) {
-			/* only consider addresses on devices in the
+	#ifdef CONFIG_VPNHIDE
+		if (vpnhide_should_hide_dev(dev))
+			continue;
+#endif
+
+		/* only consider addresses on devices in the
 			 * same L3 domain
 			 */
 			if (l3mdev_master_ifindex_rcu(dev) != master_idx)
@@ -4411,6 +4417,11 @@ static void if6_seq_stop(struct seq_file *seq, void *v)
 static int if6_seq_show(struct seq_file *seq, void *v)
 {
 	struct inet6_ifaddr *ifp = (struct inet6_ifaddr *)v;
+#ifdef CONFIG_VPNHIDE
+	if (ifp->idev && ifp->idev->dev &&
+	    vpnhide_should_hide_dev(ifp->idev->dev))
+		return 0;
+#endif
 	seq_printf(seq, "%pi6 %02x %02x %02x %02x %8s\n",
 		   &ifp->addr,
 		   ifp->idev->dev->ifindex,
@@ -4984,6 +4995,11 @@ static int inet6_fill_ifaddr(struct sk_buff *skb, struct inet6_ifaddr *ifa,
 	struct nlmsghdr  *nlh;
 	u32 preferred, valid;
 
+#ifdef CONFIG_VPNHIDE
+	if (ifa->idev && ifa->idev->dev &&
+	    unlikely(vpnhide_should_hide_dev(ifa->idev->dev)))
+		return 0;
+#endif
 	nlh = nlmsg_put(skb, args->portid, args->seq, args->event,
 			sizeof(struct ifaddrmsg), args->flags);
 	if (!nlh)

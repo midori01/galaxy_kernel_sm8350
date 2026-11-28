@@ -16,6 +16,7 @@
  *		Mike McLagan	:	Routing by source
  */
 
+#include <linux/vpnhide.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/mm.h>
@@ -58,6 +59,7 @@ static void ip_cmsg_recv_pktinfo(struct msghdr *msg, struct sk_buff *skb)
 	struct in_pktinfo info = *PKTINFO_SKB_CB(skb);
 
 	info.ipi_addr.s_addr = ip_hdr(skb)->daddr;
+	vpnhide_pktinfo4_post(&info);
 
 	put_cmsg(msg, SOL_IP, IP_PKTINFO, sizeof(info), &info);
 }

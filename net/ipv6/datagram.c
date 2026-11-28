@@ -7,6 +7,7 @@
  *	Pedro Roque		<roque@di.fc.ul.pt>
  */
 
+#include <linux/vpnhide.h>
 #include <linux/capability.h>
 #include <linux/errno.h>
 #include <linux/types.h>
@@ -588,6 +589,8 @@ void ip6_datagram_recv_common_ctl(struct sock *sk, struct msghdr *msg,
 			ipv6_addr_set_v4mapped(ip_hdr(skb)->daddr,
 					       &src_info.ipi6_addr);
 		}
+
+		vpnhide_pktinfo6_post(&src_info);
 
 		if (src_info.ipi6_ifindex >= 0)
 			put_cmsg(msg, SOL_IPV6, IPV6_PKTINFO,

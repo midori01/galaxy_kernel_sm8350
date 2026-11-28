@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+#include <linux/vpnhide.h>
 #include <linux/kmod.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -20,8 +21,14 @@
 
 static int dev_ifname(struct net *net, struct ifreq *ifr)
 {
+	int _ret;
 	ifr->ifr_name[IFNAMSIZ-1] = 0;
-	return netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);
+	_ret = netdev_get_name(net, ifr->ifr_name, ifr->ifr_ifindex);
+#ifdef CONFIG_VPNHIDE
+	if (_ret == 0 && vpnhide_should_hide_ifname(ifr->ifr_name))
+		return -ENODEV;
+#endif
+	return _ret;
 }
 
 static gifconf_func_t *gifconf_list[NPROTO];
@@ -71,6 +78,11 @@ int dev_ifconf(struct net *net, struct ifconf *ifc, int size)
 
 	total = 0;
 	for_each_netdev(net, dev) {
+#ifdef CONFIG_VPNHIDE
+		if (vpnhide_should_hide_dev(dev))
+			continue;
+#endif
+
 		for (i = 0; i < NPROTO; i++) {
 			if (gifconf_list[i]) {
 				int done;
@@ -107,6 +119,11 @@ static int dev_ifsioc_locked(struct net *net, struct ifreq *ifr, unsigned int cm
 
 	if (!dev)
 		return -ENODEV;
+
+#ifdef CONFIG_VPNHIDE
+	if (vpnhide_should_hide_dev(dev))
+		return -ENODEV;
+#endif
 
 	switch (cmd) {
 	case SIOCGIFFLAGS:	/* Get interface flags */

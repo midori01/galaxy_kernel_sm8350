@@ -9,6 +9,7 @@
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  */
 
+#include <linux/vpnhide.h>
 #include <linux/uaccess.h>
 #include <linux/bitops.h>
 #include <linux/types.h>
@@ -1790,6 +1791,11 @@ int fib_dump_info(struct sk_buff *skb, u32 portid, u32 seq, int event,
 	struct nlmsghdr *nlh;
 	struct rtmsg *rtm;
 
+#ifdef CONFIG_VPNHIDE
+	if (fi && fi->fib_nh[0].fib_nh_dev &&
+	    vpnhide_should_hide_dev(fi->fib_nh[0].fib_nh_dev))
+		return 0;
+#endif
 	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*rtm), flags);
 	if (!nlh)
 		return -EMSGSIZE;

@@ -11,6 +11,7 @@
  * Jamal Hadi Salim <hadi@nortelnetworks.com>: 990601: ingress support
  */
 
+#include <linux/vpnhide.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -870,6 +871,10 @@ static int tc_fill_qdisc(struct sk_buff *skb, struct Qdisc *q, u32 clid,
 	__u32 qlen;
 
 	cond_resched();
+#ifdef CONFIG_VPNHIDE
+	if (vpnhide_should_hide_dev(qdisc_dev(q)))
+		goto out_nlmsg_trim;
+#endif
 	nlh = nlmsg_put(skb, portid, seq, event, sizeof(*tcm), flags);
 	if (!nlh)
 		goto out_nlmsg_trim;
